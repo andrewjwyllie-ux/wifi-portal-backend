@@ -1,49 +1,44 @@
+from flask import Flask, request, render_template_string
+from pprint import pprint
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    return "App is running!"
+
+
+@app.route("/wifi/success")
+def wifi_success():
+    html = """
+    <html>
+      <body>
+        <h1>Payment received 🎉</h1>
+        <p>Thanks! Your voucher feature will go here soon.</p>
+      </body>
+    </html>
+    """
+    return render_template_string(html)
+
+
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
-    # Very defensive version: never 500, always logs the error
-    from pprint import pprint
     try:
-        payload = request.get_data(as_text=True)
-        headers = dict(request.headers)
-
+        # Log headers and body so we can see what arrives
         print("🔔 Webhook hit")
         print("Headers:")
-        pprint(headers)
+        pprint(dict(request.headers))
         print("Payload:")
-        print(payload)
+        print(request.get_data(as_text=True))
 
-        # If we don't have Stripe configured yet, just log and return OK
-        if not STRIPE_WEBHOOK_SECRET or not STRIPE_SECRET_KEY:
-            print("⚠ Stripe secrets not fully configured; skipping verification.")
-            return "", 200
-
-        # Only do real Stripe verification if libs and secrets are present
-        try:
-            event = stripe.Webhook.construct_event(
-                payload=payload,
-                sig_header=headers.get("Stripe-Signature", ""),
-                secret=STRIPE_WEBHOOK_SECRET,
-            )
-        except stripe.error.SignatureVerificationError as e:
-            print("❌ Signature verification failed:", e)
-            return "Invalid signature", 400
-        except Exception as e:
-            print("❌ Error parsing Stripe event:", repr(e))
-            return "Webhook error", 400
-
-        print("✅ Received Stripe event type:", event.get("type"))
-
-        if event.get("type") == "checkout.session.completed":
-            session = event["data"]["object"]
-            print("💰 Checkout session completed:", session.get("id"))
-            # Later: allocate voucher here
-
+        # Always succeed for now – no Stripe verification yet
         return "", 200
-
     except Exception as e:
-        # Absolute last-resort safety: never crash with 500
+        # Even if something weird happens, do NOT crash the app
         print("💥 Unexpected error in webhook handler:", repr(e))
-        return "Internal error", 200
+        return "OK", 200
 
 
-
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
