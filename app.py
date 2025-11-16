@@ -6,7 +6,8 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "App is running!"
+    print("🏠 Index (/) hit")
+    return "App is running from DigitalOcean!\n"
 
 
 @app.route("/wifi/success")
@@ -25,19 +26,15 @@ def wifi_success():
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
     try:
-        # Log headers and body so we can see what arrives
-        print("🔔 Webhook hit")
+        print("🔔 /stripe/webhook hit")
         print("Headers:")
         pprint(dict(request.headers))
         print("Payload:")
         print(request.get_data(as_text=True))
-
-        # Always succeed for now – no Stripe verification yet
-        return "", 200
+        return "Webhook received OK\n", 200
     except Exception as e:
-        # Even if something weird happens, do NOT crash the app
         print("💥 Unexpected error in webhook handler:", repr(e))
-        return "OK", 200
+        return "OK\n", 200
 
 
 if __name__ == "__main__":
