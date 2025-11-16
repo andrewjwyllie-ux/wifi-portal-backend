@@ -1,73 +1,49 @@
-import os
-from flask import Flask, request, jsonify, render_template_string
-import stripe
-
-app = Flask(__name__)
-
-# Stripe config from environment variables
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-if STRIPE_SECRET_KEY:
-    stripe.api_key = STRIPE_SECRET_KEY
-
-
-@app.route("/")
-def index():
-    return "App is running!"
-
-
-@app.route("/wifi/success")
-def wifi_success():
-    html = """
-    <html>
-      <body>
-        <h1>Payment received 🎉</h1>
-        <p>Thanks! Your voucher feature will go here soon.</p>
-      </body>
-    </html>
-    """
-    return render_template_string(html)
-
-
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
-    # Verify webhook signature
-    payload = request.data
-    sig_header = request.headers.get("Stripe-Signature", "")
+    # Very defensive version: never 500, always logs the error
+    from pprint import pprint
+    try:
+        payload = request.get_data(as_text=True)
+        headers = dict(request.headers)
 
-    if not STRIPE_WEBHOOK_SECRET:
-        # If not configured yet, just log and return OK so deployments don’t break
-        print("⚠ STRIPE_WEBHOOK_SECRET not set, skipping verification")
-        print("Webhook payload:", payload)
+        print("🔔 Webhook hit")
+        print("Headers:")
+        pprint(headers)
+        print("Payload:")
+        print(payload)
+
+        # If we don't have Stripe configured yet, just log and return OK
+        if not STRIPE_WEBHOOK_SECRET or not STRIPE_SECRET_KEY:
+            print("⚠ Stripe secrets not fully configured; skipping verification.")
+            return "", 200
+
+        # Only do real Stripe verification if libs and secrets are present
+        try:
+            event = stripe.Webhook.construct_event(
+                payload=payload,
+                sig_header=headers.get("Stripe-Signature", ""),
+                secret=STRIPE_WEBHOOK_SECRET,
+            )
+        except stripe.error.SignatureVerificationError as e:
+            print("❌ Signature verification failed:", e)
+            return "Invalid signature", 400
+        except Exception as e:
+            print("❌ Error parsing Stripe event:", repr(e))
+            return "Webhook error", 400
+
+        print("✅ Received Stripe event type:", event.get("type"))
+
+        if event.get("type") == "checkout.session.completed":
+            session = event["data"]["object"]
+            print("💰 Checkout session completed:", session.get("id"))
+            # Later: allocate voucher here
+
         return "", 200
 
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=sig_header,
-            secret=STRIPE_WEBHOOK_SECRET,
-        )
-    except stripe.error.SignatureVerificationError as e:
-        print("❌ Webhook signature verification failed:", e)
-        return "Invalid signature", 400
     except Exception as e:
-        print("❌ Error parsing webhook:", e)
-        return "Webhook error", 400
-
-    # Handle the event
-    print("✅ Received event:", event["type"])
-
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        print("💰 Checkout session completed:", session.get("id"))
-        # 👉 Later: allocate voucher based on session/price, store mapping, etc.
-
-    # You can add more event types later as needed
-
-    return "", 200
+        # Absolute last-resort safety: never crash with 500
+        print("💥 Unexpected error in webhook handler:", repr(e))
+        return "Internal error", 200
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
 
