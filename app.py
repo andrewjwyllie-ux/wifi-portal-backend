@@ -16,20 +16,81 @@ if STRIPE_SECRET_KEY:
 else:
     print("⚠ STRIPE_SECRET_KEY is not set", flush=True)
 
+# --- VERY SIMPLE VOUCHER STORAGE (for testing only) ---
+
+# Pretend these came from Google Sheets / Grandstream
+VOUCHER_POOL = [
+    "VOUCHER-TEST-001",
+    "VOUCHER-TEST-002",
+    "VOUCHER-TEST-003",
+]
+
+# session_id -> voucher_code
+SESSION_VOUCHERS = {}
+
+
+def allocate_voucher(session_id: str) -> str:
+    """
+    Take the next voucher from the pool and assign it to this session.
+    """
+    if session_id in SESSION_VOUCHERS:
+        # Already assigned
+        return SESSION_VOUCHERS[session_id]
+
+    if not VOUCHER_POOL:
+        # No vouchers left – in real life you'd handle this better
+        return "NO-VOUCHERS-AVAILABLE"
+
+    code = VOUCHER_POOL.pop(0)
+    SESSION_VOUCHERS[session_id] = code
+    print(f"🎟 Assigned voucher {code} to session {session_id}", flush=True)
+    return code
+
 
 @app.route("/")
 def index():
     print("🏠 Index (/) hit", flush=True)
-    return "App is running from DigitalOcean with Stripe!\n"
+    return "App is running from DigitalOcean with Stripe + vouchers!\n"
 
 
 @app.route("/wifi/success")
 def wifi_success():
-    html = """
+    # We expect Stripe to redirect here with ?session_id=cs_xxx
+    session_id = request.args.get("session_id")
+
+    if not session_id:
+        html = """
+        <html>
+          <body>
+            <h1>Payment received 🎉</h1>
+            <p>We could not find a session_id in the URL.</p>
+            <p>For testing, open: /wifi/success?session_id=cs_test_...</p>
+          </body>
+        </html>
+        """
+        return render_template_string(html)
+
+    voucher = SESSION_VOUCHERS.get(session_id)
+
+    if not voucher:
+        html = f"""
+        <html>
+          <body>
+            <h1>Payment found, but no voucher yet 🤔</h1>
+            <p>Session ID: {session_id}</p>
+            <p>Either the webhook hasn’t run yet, or this session didn’t get a voucher.</p>
+          </body>
+        </html>
+        """
+        return render_template_string(html)
+
+    html = f"""
     <html>
       <body>
         <h1>Payment received 🎉</h1>
-        <p>Thanks! Your voucher feature will go here soon.</p>
+        <p>Your WiFi voucher code is:</p>
+        <h2>{voucher}</h2>
+        <p>Session ID: {session_id}</p>
       </body>
     </html>
     """
@@ -89,9 +150,9 @@ def stripe_webhook():
         print(f"💰 checkout.session.completed: id={session_id}, "
               f"amount={amount_total}, currency={currency}",
               flush=True)
-        # 👉 Later: allocate a voucher here and store mapping
 
-    # You can add handling for other event types here later.
+        if session_id:
+            allocate_voucher(session_id)
 
     return Response("Received\n", status=200)
 
