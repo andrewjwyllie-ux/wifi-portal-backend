@@ -1,161 +1,177 @@
 import os
-from pprint import pprint
-
-from flask import Flask, request, render_template_string
-import stripe
+import json
+from datetime import datetime
+from flask import Flask, request, render_template_string, abort
+import gspread
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-# --- Stripe configuration from environment variables ---
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+# === CONFIG ===
+GRANDSTREAM_URL = os.getenv("GRANDSTREAM_URL", "http://192.168.1.67/cp/index.html")
+GOOGLE_SHEETS_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
-if STRIPE_SECRET_KEY:
-    stripe.api_key = STRIPE_SECRET_KEY
-    print("✅ STRIPE_SECRET_KEY loaded", flush=True)
-else:
-    print("⚠ STRIPE_SECRET_KEY is not set", flush=True)
+# Map product query param -> worksheet/tab name
+PRODUCT_SHEET_MAP = {
+    "1device": "1device",
+    "3devices": "3devices",
+    "5devices": "5devices",
+}
 
-# --- VERY SIMPLE VOUCHER STORAGE (for testing only) ---
+# === GOOGLE SHEETS CLIENT SETUP ===
+if not GOOGLE_SHEETS_CREDS_JSON or not GOOGLE_SHEET_ID:
+    raise RuntimeError("Missing GOOGLE_SHEETS_CREDS_JSON or GOOGLE_SHEET_ID env variables")
 
-# Pretend these came from Google Sheets / Grandstream
-VOUCHER_POOL = [
-    "VOUCHER-TEST-001",
-    "VOUCHER-TEST-002",
-    "VOUCHER-TEST-003",
-]
+creds_dict = json.loads(GOOGLE_SHEETS_CREDS_JSON)
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+gc = gspread.authorize(credentials)
 
-# session_id -> voucher_code
-SESSION_VOUCHERS = {}
+sheet = gc.open_by_key(GOOGLE_SHEET_ID)
 
 
-def allocate_voucher(session_id: str) -> str:
+def get_next_voucher(product_key: str) -> str:
     """
-    Take the next voucher from the pool and assign it to this session.
+    Returns next unused voucher code for the given product_key
+    and marks it as used in the sheet.
     """
-    if session_id in SESSION_VOUCHERS:
-        # Already assigned
-        return SESSION_VOUCHERS[session_id]
+    if product_key not in PRODUCT_SHEET_MAP:
+        raise ValueError("Unknown product")
 
-    if not VOUCHER_POOL:
-        # No vouchers left – in real life you'd handle this better
-        return "NO-VOUCHERS-AVAILABLE"
+    worksheet_name = PRODUCT_SHEET_MAP[product_key]
+    ws = sheet.worksheet(worksheet_name)
 
-    code = VOUCHER_POOL.pop(0)
-    SESSION_VOUCHERS[session_id] = code
-    print(f"🎟 Assigned voucher {code} to session {session_id}", flush=True)
-    return code
+    # Assumes:
+    # Col A: voucher code
+    # Col B: used flag (blank = unused)
+    # Col C: timestamp (optional)
+    all_rows = ws.get_all_values()
+    # Skip header if you have one; if no header, start at row 1
+    start_row = 2 if all_rows and all_rows[0][0].lower() == "code" else 1
+
+    for i in range(start_row, len(all_rows) + 1):
+        used_cell = ws.cell(i, 2).value  # Column B
+        if not used_cell:
+            code = ws.cell(i, 1).value  # Column A
+            if not code:
+                continue
+
+            # Mark as used
+            ws.update_cell(i, 2, "yes")
+            ws.update_cell(i, 3, datetime.utcnow().isoformat() + "Z")
+            return code
+
+    # If we get here, no codes left
+    raise RuntimeError("No voucher codes available for this product")
+
+
+SUCCESS_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WiFi Access Voucher</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #f5f5f5;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: white;
+      padding: 1.5rem;
+      border-radius: 12px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-top: 0;
+      margin-bottom: 0.75rem;
+      text-align: center;
+    }
+    .voucher-box {
+      margin: 1rem 0;
+      padding: 1rem;
+      border-radius: 8px;
+      border: 2px dashed #0070f3;
+      font-size: 1.3rem;
+      font-weight: 600;
+      text-align: center;
+      word-break: break-all;
+      background-color: #f0f7ff;
+    }
+    p {
+      margin: 0.4rem 0;
+    }
+    .hint {
+      font-size: 0.9rem;
+      color: #555;
+    }
+    .btn {
+      display: inline-block;
+      width: 100%;
+      text-align: center;
+      margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      background: #0070f3;
+      color: white;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .btn:hover {
+      background: #0059c1;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Payment Successful</h1>
+    <p>Your WiFi access voucher code is:</p>
+    <div class="voucher-box">{{ voucher_code }}</div>
+    <p class="hint">
+      Please copy and save this code for your records.
+      You will need it on the WiFi login page.
+    </p>
+    <a class="btn" href="{{ grandstream_url }}">Back to WiFi Login Page</a>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/success")
+def success():
+    product = request.args.get("product")
+    if not product:
+        abort(400, description="Missing product parameter")
+
+    try:
+        voucher_code = get_next_voucher(product)
+    except Exception as e:
+        # Show a graceful error if something goes wrong
+        return f"Error retrieving voucher: {str(e)}", 500
+
+    return render_template_string(
+        SUCCESS_TEMPLATE,
+        voucher_code=voucher_code,
+        grandstream_url=GRANDSTREAM_URL,
+    )
 
 
 @app.route("/")
-def index():
-    print("🏠 Index (/) hit", flush=True)
-    return "App is running from DigitalOcean with Stripe + vouchers!\n"
-
-
-@app.route("/wifi/success")
-def wifi_success():
-    # We expect Stripe to redirect here with ?session_id=cs_xxx
-    session_id = request.args.get("session_id")
-
-    if not session_id:
-        html = """
-        <html>
-          <body>
-            <h1>Payment received 🎉</h1>
-            <p>We could not find a session_id in the URL.</p>
-            <p>For testing, open: /wifi/success?session_id=cs_test_...</p>
-          </body>
-        </html>
-        """
-        return render_template_string(html)
-
-    voucher = SESSION_VOUCHERS.get(session_id)
-
-    if not voucher:
-        html = f"""
-        <html>
-          <body>
-            <h1>Payment found, but no voucher yet 🤔</h1>
-            <p>Session ID: {session_id}</p>
-            <p>Either the webhook hasn’t run yet, or this session didn’t get a voucher.</p>
-          </body>
-        </html>
-        """
-        return render_template_string(html)
-
-    html = f"""
-    <html>
-      <body>
-        <h1>Payment received 🎉</h1>
-        <p>Your WiFi voucher code is:</p>
-        <h2>{voucher}</h2>
-        <p>Session ID: {session_id}</p>
-      </body>
-    </html>
-    """
-    return render_template_string(html)
-
-
-@app.route("/stripe/webhook", methods=["POST"])
-def stripe_webhook():
-    """
-    Stripe webhook endpoint.
-    - If Stripe secrets or signature header are missing: log and return 200.
-    - If present: verify event, handle checkout.session.completed.
-    - Never crash with 500; always log errors.
-    """
-    from flask import Response
-
-    print("🔔 /stripe/webhook hit", flush=True)
-
-    payload = request.get_data(as_text=True)
-    headers = dict(request.headers)
-    sig_header = headers.get("Stripe-Signature")
-
-    print("Headers:", flush=True)
-    pprint(headers)
-    print("Payload:", flush=True)
-    print(payload, flush=True)
-
-    # If we're just testing with curl or secrets aren't set, don't try to verify
-    if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET or not sig_header:
-        print("⚠ Missing Stripe config or signature header; "
-              "skipping Stripe verification and returning 200.",
-              flush=True)
-        return Response("OK\n", status=200)
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=sig_header,
-            secret=STRIPE_WEBHOOK_SECRET,
-        )
-    except stripe.error.SignatureVerificationError as e:
-        print("❌ Signature verification failed:", repr(e), flush=True)
-        # Still return 200 so Stripe doesn't keep retrying forever
-        return Response("Invalid signature\n", status=200)
-    except Exception as e:
-        print("❌ Error parsing Stripe event:", repr(e), flush=True)
-        return Response("Webhook error\n", status=200)
-
-    event_type = event.get("type")
-    print(f"✅ Verified Stripe event type: {event_type}", flush=True)
-
-    if event_type == "checkout.session.completed":
-        session = event["data"]["object"]
-        session_id = session.get("id")
-        amount_total = session.get("amount_total")
-        currency = session.get("currency")
-        print(f"💰 checkout.session.completed: id={session_id}, "
-              f"amount={amount_total}, currency={currency}",
-              flush=True)
-
-        if session_id:
-            allocate_voucher(session_id)
-
-    return Response("Received\n", status=200)
+def health():
+    return "OK", 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
