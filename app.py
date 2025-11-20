@@ -119,6 +119,7 @@ SUCCESS_TEMPLATE = """
     .btn {
       display: inline-block;
       width: 100%;
+      box-sizing: border-box;   /* <— prevents overshoot */
       text-align: center;
       margin-top: 1rem;
       padding: 0.75rem 1rem;
