@@ -8,7 +8,7 @@ from google.oauth2.service_account import Credentials
 app = Flask(__name__)
 
 # === CONFIG ===
-GRANDSTREAM_URL = os.getenv("GRANDSTREAM_URL", "http://192.168.1.67/cp/index.html")
+GRANDSTREAM_URL = os.getenv("GRANDSTREAM_URL", "http://192.168.1.227/cp/index.html")
 GOOGLE_SHEETS_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
